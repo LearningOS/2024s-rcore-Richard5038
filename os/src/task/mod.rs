@@ -14,13 +14,13 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::config::MAX_APP_NUM;
+use crate::config::{MAX_APP_NUM,MAX_SYSCALL_NUM};
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
-
+pub use crate::timer::{get_time_ms, get_time_us};
 pub use context::TaskContext;
 
 /// The task manager, where all the tasks are managed.
@@ -45,31 +45,53 @@ pub struct TaskManagerInner {
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
+    // checkpoint: usize,
 }
+// impl TaskManagerInner {
+//     /// update checkpoint and return the diff time
+//     fn update_checkpoint(&mut self) -> usize {
+//         let prev_point = self.checkpoint;
+//         self.checkpoint = get_time_ms();
+//         return self.checkpoint - prev_point;
+//     }
+// }
 
 lazy_static! {
     /// Global variable: TASK_MANAGER
     pub static ref TASK_MANAGER: TaskManager = {
-        let num_app = get_num_app();
+        let num_app = get_num_app();//调用 loader 子模块提供的 get_num_app 接口获取链接到内核的应用总数；
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            syscall_times: [0; MAX_SYSCALL_NUM],
+            // start_time: 0,
+            // user_time: 0,
+            // kernel_time: 0,
         }; MAX_APP_NUM];
+        //依次对每个任务控制块进行初始化，将其运行状态设置为 Ready ，
+        //并在它的内核栈栈顶压入一些初始化 上下文，然后更新它的 task_cx 
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
         }
+        //创建 TaskManager 实例并返回。
         TaskManager {
             num_app,
             inner: unsafe {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    // checkpoint: 0,
                 })
             },
         }
     };
 }
+/*lazy_static! 宏确保 TASK_MANAGER 在首次访问时被初始化，并且之后不会再次初始化。
+TaskControlBlock 结构体包含任务上下文和任务状态。
+TaskContext::zero_init() 和 TaskContext::goto_restore() 是自定义函数，用于初始化和恢复任务上下文。
+UPSafeCell 是一个封装了内部可变性的安全类型，它提供了线程安全的访问。
+TaskManager 结构体管理所有任务和当前任务的状态。*/ 
 
 impl TaskManager {
     /// Run the first task in task list.
@@ -81,6 +103,7 @@ impl TaskManager {
         let task0 = &mut inner.tasks[0];
         task0.task_status = TaskStatus::Running;
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
+        // inner.update_checkpoint();
         drop(inner);
         let mut _unused = TaskContext::zero_init();
         // before this, we should drop local variables that must be dropped manually
@@ -94,6 +117,7 @@ impl TaskManager {
     fn mark_current_suspended(&self) {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
+        // inner.tasks[current].kernel_time += inner.update_checkpoint();
         inner.tasks[current].task_status = TaskStatus::Ready;
     }
 
@@ -168,4 +192,24 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+/// increase_current_syscall_count
+pub fn increase_current_syscall_count(syscall_id: usize) {
+    if syscall_id >= MAX_SYSCALL_NUM {
+        return;
+    }
+    // TASK_MANAGER.increase_current_syscall_count(syscall_id);
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    inner.tasks[current].syscall_times[syscall_id] += 1;
+}
+
+/// get_current_task_info
+// pub fn get_current_task_info() -> (current_task_info) {
+//     TASK_MANAGER.get_current_task_info()
+// }
+pub fn get_current_task_info() -> TaskControlBlock {
+    let inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    inner.tasks[current].clone()
 }
